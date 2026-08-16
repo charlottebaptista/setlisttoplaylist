@@ -44,6 +44,10 @@ The predicted songs can then be turned into a Spotify playlist with the generate
 - Spotify Web API
 - Spotipy
 
+## Disclaimer
+
+Setlists are predictions, not guarantees. Artists change their sets. That’s part of the fun.
+
 ## Running locally
 
 Clone the repository and create a Python virtual environment:
@@ -62,7 +66,3 @@ SPOTIPY_REDIRECT_URI=http://127.0.0.1:8888/callback
 
 Then run:
 python3 app.py
-
-Disclaimer
-
-Setlists are predictions, not guarantees. Artists change their sets. That’s part of the fun.
