@@ -1,319 +1,320 @@
 import os
 import requests
 import spotipy
+
 from dotenv import load_dotenv
 from spotipy.oauth2 import SpotifyOAuth
 
+
 load_dotenv()
 
-# API credentials
-ticketmaster_key = os.getenv("TICKETMASTER_API_KEY")
-setlist_key = os.getenv("SETLISTFM_API_KEY")
-spotify_client_id = os.getenv("SPOTIFY_CLIENT_ID")
-spotify_client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
-spotify_redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI")
+SETLISTFM_API_KEY = os.getenv("SETLISTFM_API_KEY")
+
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
+SPOTIFY_REDIRECT_URI = os.getenv(
+    "SPOTIPY_REDIRECT_URI",
+    "http://127.0.0.1:8888/callback",
+)
 
 
-def search_shows(search_term):
-    """Search upcoming Dublin music shows."""
-
-    url = "https://app.ticketmaster.com/discovery/v2/events.json"
-
-    params = {
-        "apikey": ticketmaster_key,
-        "keyword": search_term,
-        "city": "Dublin",
-        "countryCode": "IE",
-        "classificationName": "music",
-        "startDateTime": "2026-08-16T00:00:00Z",
-        "endDateTime": "2026-11-16T23:59:59Z",
-        "size": 100,
-        "sort": "date,asc",
-    }
-
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-
-    events = response.json().get("_embedded", {}).get("events", [])
-
-    shows = []
-
-    for event in events:
-        attractions = event.get("_embedded", {}).get("attractions", [])
-
-        if attractions:
-            artist = attractions[0].get("name")
-        else:
-            artist = event["name"]
-
-        venues = (
-            event.get("_embedded", {})
-            .get("venues", [])
-        )
-
-        venue = (
-            venues[0].get("name", "Unknown venue")
-            if venues
-            else "Unknown venue"
-        )
-
-        shows.append({
-            "name": event["name"],
-            "artist": artist,
-            "date": event["dates"]["start"].get("localDate"),
-            "venue": venue,
-            "id": event["id"],
-        })
-
-    return shows
-
-
-def get_recent_setlists(artist):
-    """Get recent setlists for an artist."""
-
-    url = "https://api.setlist.fm/rest/1.0/search/setlists"
+def search_setlistfm(artist_name):
+    """Find an artist's recent shows on Setlist.fm."""
 
     headers = {
         "Accept": "application/json",
-        "x-api-key": setlist_key,
-    }
-
-    params = {
-        "artistName": artist,
-        "p": 1,
+        "x-api-key": SETLISTFM_API_KEY,
     }
 
     response = requests.get(
-        url,
+        "https://api.setlist.fm/rest/1.0/search/setlists",
         headers=headers,
-        params=params,
+        params={
+            "artistName": artist_name,
+            "p": 1,
+            "sort": "sortName",
+        },
     )
 
-    response.raise_for_status()
+    if not response.ok:
+        print("\nSetlist.fm error:")
+        print(response.text)
+        return None
 
     data = response.json()
+    setlists = data.get("setlist", [])
 
-    historical_setlists = []
+    if not setlists:
+        print(
+            f"\nNo recent shows found for '{artist_name}'."
+        )
+        return None
 
-    for setlist in data.get("setlist", [])[:10]:
-        songs = []
+    return setlists[:10]
 
-        for song in setlist.get("sets", {}).get("set", []):
-            song_data = song.get("song", [])
 
-            if isinstance(song_data, list):
-                for item in song_data:
-                    name = item.get("name")
-                    if name:
-                        songs.append(name)
-            else:
-                name = song_data.get("name")
+def extract_songs(setlist):
+    """Extract song names from one Setlist.fm show."""
+
+    songs = []
+
+    for song in setlist.get("sets", {}).get("set", []):
+        song_data = song.get("song", [])
+
+        if isinstance(song_data, list):
+            for item in song_data:
+                name = item.get("name")
+
                 if name:
                     songs.append(name)
 
+        else:
+            name = song_data.get("name")
+
+            if name:
+                songs.append(name)
+
+    return songs
+
+
+def predict_setlist(setlists):
+    """Predict songs based on frequency across recent shows."""
+
+    historical_setlists = []
+
+    for setlist in setlists:
+        songs = extract_songs(setlist)
+
         if songs:
-            historical_setlists.append({
-                "date": setlist["eventDate"],
-                "venue": setlist["venue"]["name"],
-                "songs": songs,
-            })
+            historical_setlists.append(songs)
 
-    return historical_setlists
+    print(
+        "\nHistorical shows with usable setlists:",
+        len(historical_setlists),
+    )
 
-
-def predict_setlist(historical_setlists):
-    """Rank songs by how consistently they appear in recent shows."""
+    if not historical_setlists:
+        return []
 
     song_counts = {}
 
-    for show in historical_setlists:
-        # set() means a song only counts once per show
-        for song in set(show["songs"]):
-            song_counts[song] = song_counts.get(song, 0) + 1
+    for songs in historical_setlists:
+        for song in set(songs):
+            song_counts[song] = (
+                song_counts.get(song, 0) + 1
+            )
 
-    total_shows = len(historical_setlists)
-
-    ranked = sorted(
+    ranked_songs = sorted(
         song_counts.items(),
         key=lambda x: x[1],
         reverse=True,
     )
 
-    likely = []
+    likely_setlist = []
 
-    for song, count in ranked:
-        if count >= 3:
-            likely.append({
-                "song": song,
-                "count": count,
-                "confidence": round(
-                    count / total_shows * 100
-                ),
-            })
+    for song, count in ranked_songs:
 
-        if len(likely) >= 15:
+        if count >= 2:
+            likely_setlist.append(
+                (song, count)
+            )
+
+        if len(likely_setlist) >= 15:
             break
 
-    return likely
+    print("\nLIKELY SETLIST\n")
+
+    total_shows = len(historical_setlists)
+
+    for number, (song, count) in enumerate(
+        likely_setlist,
+        start=1,
+    ):
+        confidence = round(
+            count / total_shows * 100
+        )
+
+        print(
+            f"{number}. {song} "
+            f"({confidence}% of recent shows)"
+        )
+
+    print(
+        f"\nPrediction based on "
+        f"{total_shows} recent shows."
+    )
+
+    return likely_setlist
 
 
-def create_spotify_playlist(artist, show_date, predicted_songs):
-    """Create a private Spotify playlist using the current API."""
+def create_spotify_playlist(
+    artist,
+    predicted_songs,
+):
+    """Create a Spotify playlist from the predicted songs."""
 
-    scope = "playlist-modify-private"
+    scope = "playlist-modify-public"
 
     sp = spotipy.Spotify(
         auth_manager=SpotifyOAuth(
-            client_id=spotify_client_id,
-            client_secret=spotify_client_secret,
-            redirect_uri=spotify_redirect_uri,
+            client_id=SPOTIFY_CLIENT_ID,
+            client_secret=SPOTIFY_CLIENT_SECRET,
+            redirect_uri=SPOTIFY_REDIRECT_URI,
             scope=scope,
+            cache_path=".spotify_cache",
             open_browser=True,
         )
     )
 
-    playlist_name = f"Likely Setlist: {artist} · {show_date}"
+    playlist_name = (
+        f"Likely Setlist: {artist}"
+    )
 
-    # Spotify's current endpoint is POST /me/playlists.
-    playlist = sp._post(
-        "me/playlists",
-        payload={
-            "name": playlist_name,
-            "public": False,
-            "description": (
-                "Predicted from recent live performances. "
-                "Based on song frequency across recent setlists."
-            ),
-        },
+    playlist = sp.current_user_playlist_create(
+        name=playlist_name,
+        public=True,
+        description=(
+            f"Predicted setlist for {artist}, "
+            f"based on recent Setlist.fm shows."
+        ),
     )
 
     track_uris = []
 
-    print("\nFinding songs on Spotify...\n")
+    for song, _ in predicted_songs:
 
-    for item in predicted_songs:
-
-        # Spotify's current Search API allows a maximum
-        # of 10 results per request. We only need 1.
         results = sp.search(
-            q=f'track:"{item["song"]}" artist:"{artist}"',
+            q=f"artist:{artist} track:{song}",
             type="track",
             limit=1,
         )
 
-        tracks = (
-            results
-            .get("tracks", {})
-            .get("items", [])
+        tracks = results.get(
+            "tracks",
+            {},
+        ).get(
+            "items",
+            [],
         )
 
         if tracks:
-            track = tracks[0]
-            track_uris.append(track["uri"])
-            print(f"✓ {item['song']}")
-        else:
-            print(f"✗ Couldn't find: {item['song']}")
+            track_uris.append(
+                tracks[0]["uri"]
+            )
 
     if track_uris:
-        # Spotify's current endpoint is POST /playlists/{id}/items.
-        sp._post(
-            f"playlists/{playlist['id']}/items",
-            payload={
-                "uris": track_uris,
-            },
+        sp.playlist_add_items(
+            playlist["id"],
+            track_uris,
         )
 
     return playlist["external_urls"]["spotify"]
 
 
-# -------------------------
-# Main application
-# -------------------------
+# --------------------------------------------------
+# MAIN APP
+# --------------------------------------------------
 
 print("\n🎵 SETLIST TO PLAYLIST\n")
 
-search_term = input(
-    "Search for an upcoming Dublin show or artist: "
+artist = input(
+    "Search for an artist: "
 ).strip()
 
-if not search_term:
-    print("Please enter a search term.")
-    exit()
+if not artist:
+    print("Please enter an artist name.")
+    raise SystemExit
 
-print(f"\nSearching for '{search_term}'...\n")
-
-shows = search_shows(search_term)
-
-if not shows:
-    print(
-        f"No upcoming Dublin shows found for "
-        f"'{search_term}'."
-    )
-    exit()
-
-print("SHOWS FOUND:\n")
-
-for i, show in enumerate(shows, start=1):
-    print(
-        f"{i}. {show['artist']} - {show['date']}\n"
-        f"   {show['venue']}\n"
-    )
-
-choice = input("Choose a show number: ")
-
-try:
-    show = shows[int(choice) - 1]
-except (ValueError, IndexError):
-    print("Invalid choice.")
-    exit()
-
-artist = show["artist"]
 
 print(
-    f"\n{artist} · "
-    f"{show['date']} · "
-    f"{show['venue']}"
+    f"\nSearching Setlist.fm for "
+    f"'{artist}'..."
 )
 
-print("\nLooking up recent setlists...")
+setlists = search_setlistfm(artist)
 
-historical_setlists = get_recent_setlists(artist)
+if not setlists:
+    raise SystemExit
 
-print(
-    f"Found {len(historical_setlists)} "
-    f"recent setlists."
-)
 
-if not historical_setlists:
-    print("No historical setlists found.")
-    exit()
+print("\nRECENT SHOWS\n")
 
-predicted = predict_setlist(historical_setlists)
+for number, setlist in enumerate(
+    setlists,
+    start=1,
+):
 
-print("\nLIKELY SETLIST\n")
-
-for i, item in enumerate(predicted, start=1):
-    print(
-        f"{i}. {item['song']} "
-        f"({item['confidence']}% of recent shows)"
+    event_date = setlist.get(
+        "eventDate",
+        "Unknown date",
     )
 
-confirm = input(
+    venue = setlist.get(
+        "venue",
+        {},
+    )
+
+    venue_name = venue.get(
+        "name",
+        "Unknown venue",
+    )
+
+    city = venue.get(
+        "city",
+        {},
+    )
+
+    city_name = city.get(
+        "name",
+        "",
+    )
+
+    location = venue_name
+
+    if city_name:
+        location += f", {city_name}"
+
+    print(
+        f"{number}. "
+        f"{event_date} · "
+        f"{location}"
+    )
+
+
+predicted = predict_setlist(
+    setlists
+)
+
+if not predicted:
+    print(
+        "\nCouldn't generate "
+        "a likely setlist."
+    )
+
+    raise SystemExit
+
+
+create_playlist = input(
     "\nCreate this playlist in Spotify? [Y/n] "
-)
+).strip().lower()
 
-if confirm.lower() != "n":
 
-    print("\nConnecting to Spotify...")
+if create_playlist in (
+    "",
+    "y",
+    "yes",
+):
 
     playlist_url = create_spotify_playlist(
         artist,
-	show["date"],
         predicted,
     )
 
-    print("\n🎉 Playlist created!")
+    print("\n✓ Playlist created!")
     print(playlist_url)
 
 else:
-    print("\nNo playlist created.")
+
+    print(
+        "\nNo playlist created."
+    )
